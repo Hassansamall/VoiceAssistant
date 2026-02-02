@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-gray-900">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Assistant - Milestone 3 (Fixed)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
+                },
+            }
+        }
+    </script>
+    <style>
+        @keyframes pulse-listening { 0%, 100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.7); } 70% { box-shadow: 0 0 0 15px rgba(52, 211, 153, 0); } }
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        .is-listening { animation: pulse-listening 2s infinite; }
+        .is-thinking::before { content: ''; display: inline-block; width: 20px; height: 20px; border-radius: 50%; border: 3px solid #6ee7b7; border-top-color: transparent; animation: spin 0.8s linear infinite; margin-right: 10px; vertical-align: middle; }
+    </style>
+</head>
+<body class="h-full flex items-center justify-center text-white font-sans p-6">
+
+    <div class="bg-gray-800 p-8 rounded-2xl shadow-2xl w-full max-w-lg">
+        
+        <h1 class="text-3xl font-bold text-center mb-4 text-emerald-400">Voice Assistant v3</h1>
+        <p class="text-center text-gray-400 mb-8">Click to start, click again to stop. Now powered by a local Whisper STT server!</p>
+
+        <!-- Button is now a toggle -->
+        <div class="text-center mb-8">
+            <button id="listenButton" class="bg-emerald-500 hover:bg-emerald-600 text-gray-900 font-bold py-4 px-8 rounded-full shadow-lg transition-all duration-300 ease-in-out transform hover:scale-105 focus:outline-none min-w-[200px]">
+                Start Listening
+            </button>
+        </div>
+
+        <div class="space-y-6">
+            <div>
+                <label for="status" class="block text-sm font-medium text-gray-300 mb-2">Status</label>
+                <div id="status" class="w-full p-4 bg-gray-700 rounded-lg text-gray-300 h-12 flex items-center">Idle. Click the button.</div>
+            </div>
+            
+            <!-- STT Output (now from Whisper) -->
+            <div>
+                <label for="sttOutput" class="block text-sm font-medium text-gray-300 mb-2">You Said (Whisper STT):</label>
+                <div id="sttOutput" class="w-full p-4 bg-gray-700 rounded-lg text-white h-24 overflow-y-auto"></div>
+            </div>
+
+            <!-- TTS Output (still browser-based) -->
+            <div>
+                <label for="ttsOutput" class="block text-sm font-medium text-gray-300 mb-2">Assistant Replied (TTS):</label>
+                <div id="ttsOutput" class="w-full p-4 bg-gray-700 rounded-lg text-emerald-300 h-24 overflow-y-auto"></div>
+            </div>
+        </div>
+        
+        <div class="text-center text-gray-500 text-xs mt-8">
+            Note: This demo uses the `MediaRecorder` API to send audio to a local Python server.
+        </div>
+    </div>
+
+    <script>
+        // --- Core Components ---
+        const listenButton = document.getElementById('listenButton');
+        const statusEl = document.getElementById('status');
+        const sttOutputEl = document.getElementById('sttOutput');
+        const ttsOutputEl = document.getElementById('ttsOutput');
+        
+        // URL for our local Python STT server
+        const STT_SERVER_URL = 'http://127.0.0.1:5000/transcribe';
+
+        // --- Component 2: Speech-to-Text (STT) - NEW IMPLEMENTATION ---
+        let mediaRecorder;
+        let audioChunks = [];
+        let isListening = false;
+
+        async function setupAudioRecorder() {
+            try {
+                // Request microphone access
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                
+                // Create a new MediaRecorder instance
+                mediaRecorder = new MediaRecorder(stream);
+
+                // Collect audio data chunks as they become available
+                mediaRecorder.ondataavailable = (event) => {
+                    audioChunks.push(event.data);
+                };
+
+                // When recording stops, send the audio to the server
+                mediaRecorder.onstop = async () => {
+                    statusEl.textContent = 'Transcribing...';
+                    
+                    // Combine all audio chunks into a single Blob
+                    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                    audioChunks = []; // Clear chunks for next recording
+
+                    // Create a FormData object to send the file
+                    const formData = new FormData();
+                    formData.append('audio', audioBlob, 'recording.webm');
+
+                    try {
+                        // Send the audio file to the Python server
+                        const response = await fetch(STT_SERVER_URL, {
+                            method: 'POST',
+                            body: formData
+                        });
+
+                        if (!response.ok) {
+                            const errorData = await response.json();
+                            throw new Error(errorData.error || `Server error: ${response.status}`);
+                        }
+
+                        const data = await response.json();
+                        
+                        // We got the transcript!
+                        const transcript = data.transcript;
+                        sttOutputEl.textContent = transcript;
+                        
+                        if (transcript.trim()) {
+                            // Send to our Gemini "NLU"
+                            processCommand(transcript);
+                        } else {
+                            statusEl.textContent = 'No speech detected. Try again.';
+                            resetButton();
+                        }
+
+                    } catch (error) {
+                        console.error('Transcription error:', error);
+                        statusEl.textContent = `Transcription Error: ${error.message}`;
+                        resetButton();
+                    }
+                };
+
+            } catch (err) {
+                console.error('Error accessing microphone:', err);
+                statusEl.textContent = 'Error: Could not access microphone. Please allow permission.';
+                listenButton.disabled = true;
+            }
+        }
+
+        // --- *** THIS FUNCTION IS FIXED *** ---
+        function toggleListening() {
+            if (!mediaRecorder) {
+                statusEl.textContent = 'Audio recorder not set up.';
+                return;
+            }
+
+            if (isListening) {
+                // --- Stop Listening ---
+                mediaRecorder.stop();
+                isListening = false;
+                
+                // NOW we disable the button and show we're working
+                listenButton.disabled = true; 
+                listenButton.textContent = 'Transcribing...';
+                listenButton.classList.remove('is-listening');
+                
+            } else {
+                // --- Start Listening ---
+                isListening = true;
+                sttOutputEl.textContent = '...';
+                ttsOutputEl.textContent = '...';
+                statusEl.textContent = 'Listening...';
+                
+                // DO NOT disable it. Just change the text.
+                listenButton.textContent = 'Stop Listening';
+                listenButton.classList.add('is-listening');
+                
+                mediaRecorder.start();
+            }
+        }
+
+        function resetButton() {
+            isListening = false;
+            listenButton.disabled = false;
+            listenButton.classList.remove('is-listening', 'is-thinking');
+            listenButton.textContent = 'Start Listening';
+        }
+        
+        // Initialize the audio recorder on page load
+        setupAudioRecorder();
+
+        // --- Component 5: Text-to-Speech (TTS) ---
+        // (This section is identical to v2)
+        const synth = window.speechSynthesis;
+        function speak(text) {
+            if (synth.speaking) {
+                console.error('speechSynthesis.speaking');
+                return;
+            }
+            if (text !== '') {
+                const utterance = new SpeechSynthesisUtterance(text);
+                utterance.onstart = () => {
+                    statusEl.textContent = 'Speaking...';
+                };
+                utterance.onend = () => {
+                    statusEl.textContent = 'Idle. Click the button.';
+                    resetButton();
+                };
+                utterance.onerror = (e) => {
+                    console.error('SpeechSynthesisUtterance.onerror', e);
+                    statusEl.textContent = 'Error speaking response.';
+                    resetButton();
+                };
+                ttsOutputEl.textContent = text;
+                synth.speak(utterance);
+            }
+        }
+
+        // --- Component 3 & 4: NLU + Actions (Gemini API) ---
+        // (This section is identical to v2)
+        async function processCommand(text) {
+            statusEl.textContent = 'Thinking...';
+            // We've already disabled the button, but add the 'thinking' style
+            listenButton.classList.add('is-thinking');
+            listenButton.textContent = 'Thinking...';
+            
+            const apiKey = "AIzaSyBJvkR_IzMMQT1NozsXuWIn8qcVrSX76IM"; 
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+            const systemPrompt = "You are a helpful and concise voice assistant, like Alexa or Siri. Your name is 'Echo'. Keep your answers brief (one or two sentences), as if you were speaking.";
+            const userQuery = text;
+
+            const payload = {
+                contents: [{ parts: [{ text: userQuery }] }],
+                systemInstruction: {
+                    parts: [{ text: systemPrompt }]
+                },
+            };
+
+            let responseText = "Sorry, I had trouble thinking of a response.";
+            try {
+                let response;
+                let retries = 3;
+                let delay = 1000;
+                for (let i = 0; i < retries; i++) {
+                    response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    if (response.ok) break;
+                    if (response.status === 429 || response.status >= 500) {
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        delay *= 2;
+                    } else {
+                        throw new Error(`API Error: ${response.status} ${response.statusText}`);
+                    }
+                }
+                if (!response.ok) throw new Error(`API request failed after ${retries} retries.`);
+                
+                const result = await response.json();
+                const candidate = result.candidates?.[0];
+                if (candidate && candidate.content?.parts?.[0]?.text) {
+                    responseText = candidate.content.parts[0].text;
+                }
+            } catch (error) {
+                console.error('Error processing command:', error);
+                responseText = `Sorry, I ran into an error: ${error.message}`;
+            }
+            speak(responseText);
+        }
+
+        // --- Event Handlers ---
+        listenButton.addEventListener('click', toggleListening);
+
+    </script>
+</body>
+</html>
